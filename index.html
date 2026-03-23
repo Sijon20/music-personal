@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wavelength — Music Player</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ─────────────────────────────────────────
+       CSS VARIABLES & RESET
+    ───────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0e0e0f;
+      --surface:     #18181b;
+      --surface-2:   #1f1f24;
+      --border:      #2a2a30;
+      --accent:      #c8f542;
+      --accent-dim:  rgba(200, 245, 66, 0.12);
+      --text:        #f0f0f0;
+      --text-muted:  #6b6b7a;
+      --text-soft:   #a0a0b0;
+      --player-h:    88px;
+      --radius:      10px;
+
+      /* album art gradient placeholder */
+      --art-grad: linear-gradient(135deg, #2a2a3e 0%, #1a1a2e 35%, #16213e 70%, #0f3460 100%);
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Mono', monospace;
+      font-size: 13px;
+      letter-spacing: 0.01em;
+      overflow: hidden;
+    }
+
+    /* ─────────────────────────────────────────
+       LAYOUT SHELL
+    ───────────────────────────────────────── */
+    .app {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      height: calc(100vh - var(--player-h));
+      overflow: hidden;
+    }
+
+    /* ─────────────────────────────────────────
+       TOP BAR / HEADER
+    ───────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 22px 32px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      position: relative;
+      z-index: 10;
+    }
+
+    .logo {
+      font-family: 'DM Serif Display', serif;
+      font-size: 22px;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+
+    .logo span {
+      color: var(--accent);
+    }
+
+    .header-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    /* ─────────────────────────────────────────
+       MAIN CONTENT / PLAYLIST AREA
+    ───────────────────────────────────────── */
+    main {
+      overflow-y: auto;
+      padding: 24px 32px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    main::-webkit-scrollbar { width: 4px; }
+    main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+    .section-label {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .section-label::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* ─────────────────────────────────────────
+       PLAYLIST
+    ───────────────────────────────────────── */
+    #playlist {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    #playlist li {
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      align-items: center;
+      gap: 14px;
+      padding: 11px 14px;
+      border-radius: var(--radius);
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #playlist li::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: var(--accent-dim);
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    #playlist li:hover { background: var(--surface); }
+    #playlist li:hover::before { opacity: 0.5; }
+
+    #playlist li.active {
+      background: var(--surface-2);
+      border-color: var(--border);
+    }
+
+    #playlist li.active::before { opacity: 1; }
+
+    .track-num {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-align: center;
+      font-weight: 300;
+      transition: opacity 0.15s;
+    }
+
+    #playlist li.active .track-num,
+    #playlist li:hover .track-num {
+      opacity: 0;
+    }
+
+    .track-icon {
+      display: none;
+      position: absolute;
+      left: 14px;
+      width: 28px;
+      text-align: center;
+    }
+
+    #playlist li.active .track-icon,
+    #playlist li:hover .track-icon {
+      display: block;
+    }
+
+    /* animated bars for active playing track */
+    .bars {
+      display: inline-flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 14px;
+    }
+
+    .bars span {
+      display: block;
+      width: 3px;
+      background: var(--accent);
+      border-radius: 2px;
+      animation: bar-bounce 0.8s ease-in-out infinite alternate;
+    }
+
+    .bars span:nth-child(1) { height: 6px;  animation-delay: 0s; }
+    .bars span:nth-child(2) { height: 12px; animation-delay: 0.15s; }
+    .bars span:nth-child(3) { height: 8px;  animation-delay: 0.3s; }
+
+    @keyframes bar-bounce {
+      from { transform: scaleY(0.4); }
+      to   { transform: scaleY(1); }
+    }
+
+    /* play icon on hover (non-active) */
+    #playlist li:not(.active):hover .track-icon::after {
+      content: '▶';
+      font-size: 11px;
+      color: var(--text-soft);
+    }
+
+    .track-title {
+      font-size: 13px;
+      color: var(--text-soft);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: color 0.15s;
+    }
+
+    #playlist li.active .track-title { color: var(--text); }
+    #playlist li:hover .track-title   { color: var(--text); }
+
+    .track-ext {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: var(--surface);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    #playlist li.active .track-ext {
+      background: var(--accent-dim);
+      border-color: rgba(200,245,66,0.25);
+      color: var(--accent);
+    }
+
+    /* ─────────────────────────────────────────
+       STATES: LOADING / EMPTY / ERROR
+    ───────────────────────────────────────── */
+    .state-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 56px 32px;
+      text-align: center;
+      color: var(--text-muted);
+    }
+
+    .state-card .icon {
+      font-size: 36px;
+      opacity: 0.4;
+    }
+
+    .state-card p {
+      font-size: 13px;
+      line-height: 1.7;
+      max-width: 320px;
+    }
+
+    .state-card code {
+      background: var(--surface);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--accent);
+    }
+
+    /* spinner */
+    .spinner {
+      width: 28px;
+      height: 28px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─────────────────────────────────────────
+       BOTTOM PLAYER BAR
+    ───────────────────────────────────────── */
+    .player-bar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: var(--player-h);
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      align-items: center;
+      gap: 0;
+      z-index: 100;
+      backdrop-filter: blur(12px);
+    }
+
+    /* glowing top edge */
+    .player-bar::before {
+      content: '';
+      position: absolute;
+      top: -1px; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent 0%, var(--accent) 40%, var(--accent) 60%, transparent 100%);
+      opacity: 0.25;
+    }
+
+    /* LEFT: album art + song info */
+    .now-playing {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 20px;
+      height: 100%;
+      border-right: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    .art-thumb {
+      width: 52px;
+      height: 52px;
+      border-radius: 6px;
+      flex-shrink: 0;
+      background: var(--art-grad);
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* vinyl groove overlay */
+    .art-thumb::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(0,0,0,0.5) 20%, transparent 20.5%),
+        radial-gradient(circle, transparent 38%, rgba(255,255,255,0.04) 38.5%, transparent 39%),
+        radial-gradient(circle, transparent 47%, rgba(255,255,255,0.03) 47.5%, transparent 48%),
+        radial-gradient(circle, transparent 56%, rgba(255,255,255,0.03) 56.5%, transparent 57%);
+    }
+
+    .song-info {
+      overflow: hidden;
+    }
+
+    .song-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 15px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: -0.01em;
+    }
+
+    .song-idle {
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    /* RIGHT: native audio controls wrapper */
+    .audio-wrap {
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      flex: 1;
+    }
+
+    audio {
+      width: 100%;
+      height: 36px;
+      /* Override defaults via accent-color (Chromium only, graceful degradation) */
+      accent-color: var(--accent);
+    }
+
+    /* subtle custom audio styling for Firefox / legacy */
+    audio::-webkit-media-controls-panel {
+      background: var(--surface-2);
+    }
+
+    /* ─────────────────────────────────────────
+       NOISE GRAIN OVERLAY
+    ───────────────────────────────────────── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+      opacity: 0.025;
+      z-index: 9999;
+    }
+
+    /* ─────────────────────────────────────────
+       RESPONSIVE
+    ───────────────────────────────────────── */
+    @media (max-width: 600px) {
+      .player-bar { grid-template-columns: 1fr; height: auto; flex-direction: column; }
+      .now-playing { border-right: none; border-bottom: 1px solid var(--border); padding: 12px 16px; }
+      .audio-wrap { padding: 12px 16px; }
+      header { padding: 16px; }
+      main { padding: 16px; }
+      .app { height: calc(100vh - 140px); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ─── APP SHELL ─── -->
+<div class="app">
+  <header>
+    <div class="logo">Wave<span>·</span>length</div>
+    <div class="header-meta" id="track-count">Loading…</div>
+  </header>
+
+  <main>
+    <div class="section-label">Library</div>
+    <ul id="playlist"></ul>
+    <div id="state-view" class="state-card">
+      <div class="spinner"></div>
+      <p>Fetching tracks from GitHub…</p>
+    </div>
+  </main>
+</div>
+
+<!-- ─── FIXED PLAYER BAR ─── -->
+<div class="player-bar">
+  <div class="now-playing">
+    <div class="art-thumb"></div>
+    <div class="song-info">
+      <div class="song-title" id="current-title">Nothing playing</div>
+      <div class="song-idle" id="current-sub">Select a track to begin</div>
+    </div>
+  </div>
+  <div class="audio-wrap">
+    <audio id="audio-player" controls preload="none">
+      Your browser does not support the audio element.
+    </audio>
+  </div>
+</div>
+
+<script>
+  /* ════════════════════════════════════════════
+     CONFIG — swap these two values for your repo
+  ════════════════════════════════════════════ */
+  const githubUsername = 'YOUR_USERNAME';
+  const repoName       = 'YOUR_REPO';
+  const musicFolder    = 'music'; // folder inside the repo containing mp3/wav files
+
+  /* ════════════════════════════════════════════
+     ELEMENTS
+  ════════════════════════════════════════════ */
+  const playlist     = document.getElementById('playlist');
+  const audioPlayer  = document.getElementById('audio-player');
+  const currentTitle = document.getElementById('current-title');
+  const currentSub   = document.getElementById('current-sub');
+  const trackCount   = document.getElementById('track-count');
+  const stateView    = document.getElementById('state-view');
+
+  let activeItem = null;
+
+  /* ════════════════════════════════════════════
+     FETCH TRACKS FROM GITHUB API
+  ════════════════════════════════════════════ */
+  const API_URL =
+    `https://api.github.com/repos/${githubUsername}/${repoName}/contents/${musicFolder}`;
+
+  async function loadTracks() {
+    try {
+      const res = await fetch(API_URL);
+
+      if (!res.ok) {
+        const msg = res.status === 404
+          ? `Repo or folder not found.<br>Check <code>${githubUsername}/${repoName}/${musicFolder}</code>`
+          : `GitHub API error: ${res.status} ${res.statusText}`;
+        showError(msg);
+        return;
+      }
+
+      const files = await res.json();
+
+      // Filter for supported audio formats
+      const audioFiles = files.filter(f =>
+        f.type === 'file' && /\.(mp3|wav|ogg|flac|m4a)$/i.test(f.name)
+      );
+
+      if (audioFiles.length === 0) {
+        showEmpty();
+        return;
+      }
+
+      // Hide loading state
+      stateView.style.display = 'none';
+
+      // Update header count
+      trackCount.textContent = `${audioFiles.length} track${audioFiles.length !== 1 ? 's' : ''}`;
+
+      // Build playlist items
+      audioFiles.forEach((file, index) => {
+        const ext        = file.name.split('.').pop().toLowerCase();
+        const displayName = file.name.replace(/\.[^.]+$/, '');
+        const li          = document.createElement('li');
+
+        li.innerHTML = `
+          <span class="track-num">${String(index + 1).padStart(2, '0')}</span>
+          <span class="track-icon"></span>
+          <span class="track-title">${displayName}</span>
+          <span class="track-ext">${ext}</span>
+        `;
+
+        li.dataset.url  = file.download_url;
+        li.dataset.name = displayName;
+
+        li.addEventListener('click', () => playTrack(li));
+        playlist.appendChild(li);
+      });
+
+    } catch (err) {
+      showError(`Network error:<br><code>${err.message}</code>`);
+    }
+  }
+
+  /* ════════════════════════════════════════════
+     PLAYBACK
+  ════════════════════════════════════════════ */
+  function playTrack(li) {
+    // Deactivate previous
+    if (activeItem && activeItem !== li) {
+      activeItem.classList.remove('active');
+      const barsEl = activeItem.querySelector('.track-icon');
+      if (barsEl) barsEl.innerHTML = '';
+    }
+
+    // Activate clicked item
+    li.classList.add('active');
+    activeItem = li;
+
+    // Animated bars in icon slot
+    const iconSlot = li.querySelector('.track-icon');
+    iconSlot.innerHTML = `
+      <span class="bars">
+        <span></span><span></span><span></span>
+      </span>
+    `;
+
+    // Update audio source & play
+    audioPlayer.src = li.dataset.url;
+    audioPlayer.play();
+
+    // Update bottom bar info
+    currentTitle.textContent = li.dataset.name;
+    currentSub.textContent   = 'Now playing';
+
+    // Smooth scroll item into view
+    li.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  /* ════════════════════════════════════════════
+     AUDIO EVENTS — sync bars with pause/play
+  ════════════════════════════════════════════ */
+  audioPlayer.addEventListener('pause', () => {
+    if (activeItem) {
+      const bars = activeItem.querySelectorAll('.bars span');
+      bars.forEach(b => b.style.animationPlayState = 'paused');
+      currentSub.textContent = 'Paused';
+    }
+  });
+
+  audioPlayer.addEventListener('play', () => {
+    if (activeItem) {
+      const bars = activeItem.querySelectorAll('.bars span');
+      bars.forEach(b => b.style.animationPlayState = 'running');
+      currentSub.textContent = 'Now playing';
+    }
+  });
+
+  audioPlayer.addEventListener('ended', () => {
+    // Auto-advance to next track
+    if (activeItem) {
+      const next = activeItem.nextElementSibling;
+      if (next) playTrack(next);
+      else currentSub.textContent = 'Finished';
+    }
+  });
+
+  /* ════════════════════════════════════════════
+     STATE HELPERS
+  ════════════════════════════════════════════ */
+  function showError(html) {
+    trackCount.textContent = 'Error';
+    stateView.innerHTML = `
+      <div class="icon">⚠️</div>
+      <p>${html}</p>
+    `;
+  }
+
+  function showEmpty() {
+    trackCount.textContent = '0 tracks';
+    stateView.innerHTML = `
+      <div class="icon">🎵</div>
+      <p>No <code>.mp3</code> or <code>.wav</code> files found in <code>${musicFolder}/</code>.<br>
+         Add audio files to your GitHub repo and reload.</p>
+    `;
+  }
+
+  /* ════════════════════════════════════════════
+     BOOT
+  ════════════════════════════════════════════ */
+  loadTracks();
+</script>
+</body>
+</html>
