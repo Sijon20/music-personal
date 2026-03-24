@@ -115,6 +115,32 @@
       background: var(--border);
     }
 
+    .library-toolbar {
+      margin-bottom: 14px;
+    }
+
+    .search-input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      color: var(--text);
+      padding: 10px 12px;
+      font-family: inherit;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .search-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .search-input:focus {
+      border-color: rgba(200,245,66,0.45);
+      box-shadow: 0 0 0 3px rgba(200,245,66,0.1);
+    }
+
     /* ─────────────────────────────────────────
        PLAYLIST
     ───────────────────────────────────────── */
@@ -268,6 +294,10 @@
       font-size: 13px;
       line-height: 1.7;
       max-width: 320px;
+    }
+
+    .state-inline {
+      padding: 28px 20px;
     }
 
     .state-card code {
@@ -591,7 +621,13 @@
 
   <main>
     <div class="section-label">Library</div>
+    <div class="library-toolbar">
+      <input id="track-search" class="search-input" type="search" placeholder="Search tracks..." aria-label="Search tracks">
+    </div>
     <ul id="playlist"></ul>
+    <div id="filter-empty" class="state-card state-inline" style="display:none;">
+      <p>No tracks match your search.</p>
+    </div>
     <div id="state-view" class="state-card">
       <div class="spinner"></div>
       <p>Fetching tracks from GitHub…</p>
@@ -667,6 +703,8 @@
   const currentTitle = document.getElementById('current-title');
   const currentSub   = document.getElementById('current-sub');
   const trackCount   = document.getElementById('track-count');
+  const trackSearch  = document.getElementById('track-search');
+  const filterEmpty  = document.getElementById('filter-empty');
   const stateView    = document.getElementById('state-view');
 
   const btnPrev   = document.getElementById('btn-prev');
@@ -688,6 +726,7 @@
   let activeItem  = null;
   let isSeeking   = false;
   let lastVol     = 1;
+  let totalTracks = 0;
 
   /* ════════════════════════════════════════════
      HELPERS
@@ -705,13 +744,47 @@
   }
 
   function updateSkipButtons() {
-    const items = playlist.querySelectorAll('li');
+    const items = getVisibleItems();
     if (!activeItem || items.length === 0) {
       btnPrev.disabled = btnNext.disabled = true; return;
     }
-    const idx = Array.from(items).indexOf(activeItem);
+    const idx = items.indexOf(activeItem);
+    if (idx === -1) {
+      btnPrev.disabled = btnNext.disabled = true;
+      return;
+    }
     btnPrev.disabled = idx <= 0;
     btnNext.disabled = idx >= items.length - 1;
+  }
+
+  function getVisibleItems() {
+    return Array.from(playlist.querySelectorAll('li')).filter(li => li.style.display !== 'none');
+  }
+
+  function updateTrackCount(filteredCount) {
+    const query = trackSearch.value.trim();
+    if (query) {
+      trackCount.textContent = `${filteredCount} of ${totalTracks} tracks`;
+      return;
+    }
+    trackCount.textContent = `${totalTracks} track${totalTracks !== 1 ? 's' : ''}`;
+  }
+
+  function applySearchFilter() {
+    const query = trackSearch.value.trim().toLowerCase();
+    const allItems = Array.from(playlist.querySelectorAll('li'));
+    let visibleCount = 0;
+
+    allItems.forEach(li => {
+      const trackName = li.dataset.name.toLowerCase();
+      const isMatch = !query || trackName.includes(query) || li === activeItem;
+      li.style.display = isMatch ? '' : 'none';
+      if (isMatch) visibleCount += 1;
+    });
+
+    filterEmpty.style.display = visibleCount === 0 ? 'flex' : 'none';
+    updateTrackCount(visibleCount);
+    updateSkipButtons();
   }
 
   /* Dynamic seek-bar fill (CSS gradient trick) */
@@ -757,7 +830,8 @@
       if (audioFiles.length === 0) { showEmpty(); return; }
 
       stateView.style.display = 'none';
-      trackCount.textContent = `${audioFiles.length} track${audioFiles.length !== 1 ? 's' : ''}`;
+      totalTracks = audioFiles.length;
+      updateTrackCount(totalTracks);
 
       audioFiles.forEach((file, index) => {
         const ext         = file.name.split('.').pop().toLowerCase();
@@ -776,6 +850,8 @@
         li.addEventListener('click', () => playTrack(li));
         playlist.appendChild(li);
       });
+
+      applySearchFilter();
 
     } catch (err) {
       showError(`Network error:<br><code>${err.message}</code>`);
@@ -821,11 +897,15 @@
      PREV / NEXT
   ════════════════════════════════════════════ */
   btnPrev.addEventListener('click', () => {
-    if (activeItem?.previousElementSibling) playTrack(activeItem.previousElementSibling);
+    const items = getVisibleItems();
+    const idx = items.indexOf(activeItem);
+    if (idx > 0) playTrack(items[idx - 1]);
   });
 
   btnNext.addEventListener('click', () => {
-    if (activeItem?.nextElementSibling) playTrack(activeItem.nextElementSibling);
+    const items = getVisibleItems();
+    const idx = items.indexOf(activeItem);
+    if (idx !== -1 && idx < items.length - 1) playTrack(items[idx + 1]);
   });
 
   /* ════════════════════════════════════════════
@@ -909,6 +989,11 @@
     iconMute.style.display = audioPlayer.volume > 0 ? 'none'  : 'block';
     updateVolFill();
   });
+
+  /* ════════════════════════════════════════════
+     SEARCH
+  ════════════════════════════════════════════ */
+  trackSearch.addEventListener('input', applySearchFilter);
 
   /* ════════════════════════════════════════════
      INIT fills
