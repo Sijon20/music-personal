@@ -153,7 +153,7 @@
 
     #playlist li {
       display: grid;
-      grid-template-columns: 28px 1fr auto;
+      grid-template-columns: 28px 1fr auto auto;
       align-items: center;
       gap: 14px;
       padding: 11px 14px;
@@ -269,6 +269,45 @@
       background: var(--accent-dim);
       border-color: rgba(200,245,66,0.25);
       color: var(--accent);
+    }
+
+    .track-action {
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 2;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      padding: 0;
+    }
+
+    .track-action svg {
+      width: 13px;
+      height: 13px;
+      fill: currentColor;
+      display: block;
+    }
+
+    .track-action:hover {
+      color: var(--text);
+      border-color: rgba(200,245,66,0.4);
+    }
+
+    .track-action:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+
+    #playlist li.is-downloaded .track-action {
+      color: #ff8f8f;
+      border-color: rgba(255, 143, 143, 0.35);
+      background: rgba(255, 143, 143, 0.08);
     }
 
     /* ─────────────────────────────────────────
@@ -694,6 +733,9 @@
   const githubUsername = 'Sijon20';
   const repoName       = 'music-personal';
   const musicFolder    = 'music';
+  const DB_NAME        = 'wavelength-cache';
+  const DB_VERSION     = 1;
+  const STORE_NAME     = 'tracks';
 
   /* ════════════════════════════════════════════
      ELEMENTS
@@ -727,6 +769,7 @@
   let isSeeking   = false;
   let lastVol     = 1;
   let totalTracks = 0;
+  let trackDb     = null;
 
   /* ════════════════════════════════════════════
      HELPERS
@@ -800,6 +843,121 @@
       `linear-gradient(to right, var(--text-soft) ${pct}%, var(--border) ${pct}%)`;
   }
 
+  function downloadIconSvg() {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20h14v-2H5v2zm7-18v10.17l3.59-3.58L17 10l-5 5-5-5 1.41-1.41L11 12.17V2h1z"/></svg>`;
+  }
+
+  function deleteIconSvg() {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12v2H6V7zm2 3h8l-1 10H9L8 10zm3-6h2l1 1h4v2H6V5h4l1-1z"/></svg>`;
+  }
+
+  function setActionIcon(btn, downloaded) {
+    btn.innerHTML = downloaded ? deleteIconSvg() : downloadIconSvg();
+    btn.title = downloaded ? 'Delete downloaded file' : 'Download for offline use';
+    btn.setAttribute('aria-label', btn.title);
+  }
+
+  function getTrackSource(li) {
+    return li.dataset.localUrl || li.dataset.url;
+  }
+
+  function markDownloaded(li, blob) {
+    if (li.dataset.localUrl) URL.revokeObjectURL(li.dataset.localUrl);
+    li.dataset.localUrl = URL.createObjectURL(blob);
+    li.classList.add('is-downloaded');
+    setActionIcon(li.querySelector('.track-action'), true);
+  }
+
+  function markRemote(li) {
+    if (li.dataset.localUrl) {
+      URL.revokeObjectURL(li.dataset.localUrl);
+      delete li.dataset.localUrl;
+    }
+    li.classList.remove('is-downloaded');
+    setActionIcon(li.querySelector('.track-action'), false);
+  }
+
+  function openTrackDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        }
+      };
+
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbGet(id) {
+    if (!trackDb) return Promise.resolve(null);
+    return new Promise((resolve, reject) => {
+      const tx = trackDb.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.get(id);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbPut(record) {
+    if (!trackDb) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const tx = trackDb.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.put(record);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbDelete(id) {
+    if (!trackDb) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const tx = trackDb.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.delete(id);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function toggleTrackDownload(li, actionBtn) {
+    if (!trackDb) return;
+
+    const isDownloaded = li.classList.contains('is-downloaded');
+    actionBtn.disabled = true;
+
+    try {
+      if (!isDownloaded) {
+        const res = await fetch(li.dataset.url);
+        if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+        const blob = await res.blob();
+        await idbPut({ id: li.dataset.id, name: li.dataset.name, blob });
+        markDownloaded(li, blob);
+      } else {
+        await idbDelete(li.dataset.id);
+        const wasPlayingThisTrack = activeItem === li && !audioPlayer.paused;
+        markRemote(li);
+
+        if (wasPlayingThisTrack) {
+          const t = audioPlayer.currentTime;
+          audioPlayer.src = li.dataset.url;
+          audioPlayer.currentTime = t;
+          audioPlayer.play();
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      actionBtn.disabled = false;
+    }
+  }
+
   function syncPlayerHeight() {
     const playerBar = document.querySelector('.player-bar');
     const playerHeight = playerBar ? playerBar.offsetHeight : 0;
@@ -837,19 +995,40 @@
         const ext         = file.name.split('.').pop().toLowerCase();
         const displayName = file.name.replace(/\.[^.]+$/, '');
         const li          = document.createElement('li');
+        const trackId     = file.path || `${musicFolder}/${file.name}`;
 
         li.innerHTML = `
           <span class="track-num">${String(index + 1).padStart(2, '0')}</span>
           <span class="track-icon"></span>
           <span class="track-title">${displayName}</span>
+          <button class="track-action" type="button" aria-label="Download for offline use" title="Download for offline use">${downloadIconSvg()}</button>
           <span class="track-ext">${ext}</span>
         `;
 
         li.dataset.url  = file.download_url;
         li.dataset.name = displayName;
+        li.dataset.id   = trackId;
+
+        const actionBtn = li.querySelector('.track-action');
+        if (!trackDb) {
+          actionBtn.disabled = true;
+          actionBtn.title = 'Offline download unavailable';
+          actionBtn.setAttribute('aria-label', actionBtn.title);
+        }
+        actionBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleTrackDownload(li, actionBtn);
+        });
+
         li.addEventListener('click', () => playTrack(li));
         playlist.appendChild(li);
       });
+
+      const items = Array.from(playlist.querySelectorAll('li'));
+      for (const li of items) {
+        const cached = await idbGet(li.dataset.id);
+        if (cached?.blob) markDownloaded(li, cached.blob);
+      }
 
       applySearchFilter();
 
@@ -874,7 +1053,7 @@
     const iconSlot = li.querySelector('.track-icon');
     iconSlot.innerHTML = `<span class="bars"><span></span><span></span><span></span></span>`;
 
-    audioPlayer.src = li.dataset.url;
+    audioPlayer.src = getTrackSource(li);
     audioPlayer.play();
 
     currentTitle.textContent = li.dataset.name;
@@ -934,7 +1113,9 @@
   audioPlayer.addEventListener('ended', () => {
     setPlayIcon(false);
     artThumb.classList.remove('spinning');
-    if (activeItem?.nextElementSibling) playTrack(activeItem.nextElementSibling);
+    const items = getVisibleItems();
+    const idx = items.indexOf(activeItem);
+    if (idx !== -1 && idx < items.length - 1) playTrack(items[idx + 1]);
     else currentSub.textContent = 'Finished';
   });
 
@@ -1022,7 +1203,15 @@
   /* ════════════════════════════════════════════
      BOOT
   ════════════════════════════════════════════ */
-  loadTracks();
+  (async () => {
+    try {
+      trackDb = await openTrackDb();
+      await loadTracks();
+    } catch (err) {
+      console.error('IndexedDB unavailable:', err);
+      await loadTracks();
+    }
+  })();
 </script>
 
 </body>
