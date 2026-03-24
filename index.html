@@ -25,6 +25,7 @@
       --text-muted:  #6b6b7a;
       --text-soft:   #a0a0b0;
       --player-h:    88px;
+      --player-effective-h: var(--player-h);
       --radius:      10px;
 
       /* album art gradient placeholder */
@@ -47,7 +48,7 @@
     .app {
       display: grid;
       grid-template-rows: auto 1fr;
-      height: calc(100vh - var(--player-h));
+      height: calc(100dvh - var(--player-effective-h));
       overflow: hidden;
     }
 
@@ -576,7 +577,6 @@
       .vol-wrap { justify-content: center; }
       header { padding: 16px; }
       main { padding: 16px; }
-      .app { height: calc(100vh - 175px); }
     }
   </style>
 </head>
@@ -725,6 +725,12 @@
     const pct = volBar.value * 100;
     volBar.style.background =
       `linear-gradient(to right, var(--text-soft) ${pct}%, var(--border) ${pct}%)`;
+  }
+
+  function syncPlayerHeight() {
+    const playerBar = document.querySelector('.player-bar');
+    const playerHeight = playerBar ? playerBar.offsetHeight : 0;
+    document.documentElement.style.setProperty('--player-effective-h', `${playerHeight}px`);
   }
 
   /* ════════════════════════════════════════════
@@ -909,6 +915,8 @@
   ════════════════════════════════════════════ */
   updateSeekFill();
   updateVolFill();
+  syncPlayerHeight();
+  window.addEventListener('resize', syncPlayerHeight);
 
   /* ════════════════════════════════════════════
      STATE HELPERS
