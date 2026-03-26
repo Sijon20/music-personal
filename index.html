@@ -492,6 +492,59 @@
     .skip-btn:disabled { opacity: 0.2; cursor: default; pointer-events: none; }
     .skip-btn svg { width: 18px; height: 18px; fill: currentColor; display: block; }
 
+    .mode-btn {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      padding: 0;
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .mode-btn:hover { color: var(--text); }
+
+    .mode-btn.is-active {
+      color: var(--accent);
+      background: var(--accent-dim);
+      border-color: rgba(200,245,66,0.35);
+    }
+
+    .mode-btn svg {
+      width: 17px;
+      height: 17px;
+      fill: currentColor;
+      display: block;
+    }
+
+    .repeat-badge {
+      position: absolute;
+      right: -2px;
+      bottom: -2px;
+      min-width: 12px;
+      height: 12px;
+      padding: 0 2px;
+      border-radius: 999px;
+      font-size: 8px;
+      line-height: 12px;
+      font-weight: 500;
+      color: #0e0e0f;
+      background: var(--accent);
+      text-align: center;
+      display: none;
+    }
+
+    .mode-btn.is-active .repeat-badge {
+      display: block;
+    }
+
     /* Big play / pause button */
     .play-btn {
       display: flex;
@@ -689,18 +742,35 @@
   <!-- CENTER: play controls + seek bar -->
   <div class="player-center">
     <div class="controls">
+      <!-- Repeat -->
+      <button class="mode-btn" id="btn-repeat" title="Repeat off" aria-label="Repeat off">
+        <svg viewBox="0 0 24 24"><path d="M17 17H7v-3l-4 4 4 4v-3h10a3 3 0 0 0 3-3v-5h-2v5a1 1 0 0 1-1 1zM7 7h10v3l4-4-4-4v3H7a3 3 0 0 0-3 3v5h2V8a1 1 0 0 1 1-1z"/></svg>
+        <span class="repeat-badge" id="repeat-badge"></span>
+      </button>
       <!-- Prev -->
       <button class="skip-btn" id="btn-prev" disabled title="Previous">
         <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+      </button>
+      <!-- Backward 10s -->
+      <button class="skip-btn" id="btn-backward" disabled title="Back 10 seconds" aria-label="Back 10 seconds">
+        <svg viewBox="0 0 24 24"><path d="M12 5V2L7 7l5 5V9c2.76 0 5 2.24 5 5 0 1.34-.52 2.59-1.46 3.54l1.42 1.42A6.96 6.96 0 0 0 19 14c0-3.87-3.13-7-7-7zm-4.92.38L5.66 3.96A8.94 8.94 0 0 0 3 10c0 4.97 4.03 9 9 9 2.14 0 4.11-.75 5.66-2l-1.42-1.42A6.96 6.96 0 0 1 12 17c-3.31 0-6-2.69-6-6 0-1.27.4-2.45 1.08-3.62z"/></svg>
       </button>
       <!-- Play / Pause -->
       <button class="play-btn" id="btn-play" disabled title="Play / Pause">
         <svg id="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         <svg id="icon-pause" viewBox="0 0 24 24" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
       </button>
+      <!-- Forward 10s -->
+      <button class="skip-btn" id="btn-forward" disabled title="Forward 10 seconds" aria-label="Forward 10 seconds">
+        <svg viewBox="0 0 24 24"><path d="M12 5V2l5 5-5 5V9c-2.76 0-5 2.24-5 5 0 1.34.52 2.59 1.46 3.54l-1.42 1.42A6.96 6.96 0 0 1 5 14c0-3.87 3.13-7 7-7zm4.92.38 1.42-1.42A8.94 8.94 0 0 1 21 10c0 4.97-4.03 9-9 9-2.14 0-4.11-.75-5.66-2l1.42-1.42A6.96 6.96 0 0 0 12 17c3.31 0 6-2.69 6-6 0-1.27-.4-2.45-1.08-3.62z"/></svg>
+      </button>
       <!-- Next -->
       <button class="skip-btn" id="btn-next" disabled title="Next">
         <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zm8-12v12h2V6h-2z"/></svg>
+      </button>
+      <!-- Shuffle -->
+      <button class="mode-btn" id="btn-shuffle" title="Shuffle off" aria-label="Shuffle off" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.18 1.42-1.42zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zM14.83 13.41l-1.42 1.42L16.59 18H14v2h6v-6h-2v2.59l-3.17-3.18z"/></svg>
       </button>
     </div>
 
@@ -751,6 +821,11 @@
 
   const btnPrev   = document.getElementById('btn-prev');
   const btnNext   = document.getElementById('btn-next');
+  const btnBack   = document.getElementById('btn-backward');
+  const btnFwd    = document.getElementById('btn-forward');
+  const btnShuffle = document.getElementById('btn-shuffle');
+  const btnRepeat  = document.getElementById('btn-repeat');
+  const repeatBadge = document.getElementById('repeat-badge');
   const btnPlay   = document.getElementById('btn-play');
   const iconPlay  = document.getElementById('icon-play');
   const iconPause = document.getElementById('icon-pause');
@@ -770,6 +845,11 @@
   let lastVol     = 1;
   let totalTracks = 0;
   let trackDb     = null;
+  let shuffleEnabled = false;
+  let repeatMode = 'off';
+  let shuffleOrder = [];
+
+  const REPEAT_MODES = ['off', 'one', 'all'];
 
   /* ════════════════════════════════════════════
      HELPERS
@@ -789,15 +869,40 @@
   function updateSkipButtons() {
     const items = getVisibleItems();
     if (!activeItem || items.length === 0) {
-      btnPrev.disabled = btnNext.disabled = true; return;
+      btnPrev.disabled = btnNext.disabled = true;
+      btnBack.disabled = btnFwd.disabled = true;
+      return;
     }
+
     const idx = items.indexOf(activeItem);
     if (idx === -1) {
       btnPrev.disabled = btnNext.disabled = true;
+      btnBack.disabled = btnFwd.disabled = true;
       return;
     }
-    btnPrev.disabled = idx <= 0;
-    btnNext.disabled = idx >= items.length - 1;
+
+    btnBack.disabled = btnFwd.disabled = false;
+
+    if (items.length === 1) {
+      const loopSingle = repeatMode === 'all';
+      btnPrev.disabled = !loopSingle;
+      btnNext.disabled = !loopSingle;
+      return;
+    }
+
+    const wraps = repeatMode === 'all';
+    if (shuffleEnabled) {
+      if (!isShuffleOrderValid(items) || !shuffleOrder.includes(activeItem)) {
+        shuffleOrder = buildShuffleOrder(items, activeItem);
+      }
+      const sIdx = shuffleOrder.indexOf(activeItem);
+      btnPrev.disabled = !wraps && sIdx <= 0;
+      btnNext.disabled = !wraps && sIdx >= shuffleOrder.length - 1;
+      return;
+    }
+
+    btnPrev.disabled = !wraps && idx <= 0;
+    btnNext.disabled = !wraps && idx >= items.length - 1;
   }
 
   function getVisibleItems() {
@@ -826,8 +931,104 @@
     });
 
     filterEmpty.style.display = visibleCount === 0 ? 'flex' : 'none';
+    if (shuffleEnabled) syncShuffleOrder();
     updateTrackCount(visibleCount);
     updateSkipButtons();
+  }
+
+  function shuffleArray(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  function buildShuffleOrder(items, current) {
+    const rest = items.filter(li => li !== current);
+    shuffleArray(rest);
+    return current && items.includes(current) ? [current, ...rest] : rest;
+  }
+
+  function isShuffleOrderValid(items) {
+    return shuffleOrder.length === items.length && shuffleOrder.every(li => items.includes(li));
+  }
+
+  function syncShuffleOrder() {
+    if (!shuffleEnabled) {
+      shuffleOrder = [];
+      return;
+    }
+
+    const items = getVisibleItems();
+    if (items.length === 0) {
+      shuffleOrder = [];
+      return;
+    }
+    shuffleOrder = buildShuffleOrder(items, activeItem);
+  }
+
+  function updateModeButtons() {
+    btnShuffle.classList.toggle('is-active', shuffleEnabled);
+    btnShuffle.setAttribute('aria-pressed', String(shuffleEnabled));
+    btnShuffle.title = shuffleEnabled ? 'Shuffle on' : 'Shuffle off';
+    btnShuffle.setAttribute('aria-label', btnShuffle.title);
+
+    btnRepeat.classList.toggle('is-active', repeatMode !== 'off');
+
+    if (repeatMode === 'one') {
+      repeatBadge.textContent = '1';
+      btnRepeat.title = 'Repeat one';
+    } else if (repeatMode === 'all') {
+      repeatBadge.textContent = '∞';
+      btnRepeat.title = 'Repeat all';
+    } else {
+      repeatBadge.textContent = '';
+      btnRepeat.title = 'Repeat off';
+    }
+    btnRepeat.setAttribute('aria-label', btnRepeat.title);
+  }
+
+  function getAdjacentTrack(direction) {
+    const items = getVisibleItems();
+    if (!activeItem || items.length === 0) return null;
+
+    const wraps = repeatMode === 'all';
+
+    if (shuffleEnabled) {
+      if (!isShuffleOrderValid(items) || !shuffleOrder.includes(activeItem)) {
+        shuffleOrder = buildShuffleOrder(items, activeItem);
+      }
+      const idx = shuffleOrder.indexOf(activeItem);
+      if (idx === -1) return null;
+
+      if (direction === 'next') {
+        if (idx < shuffleOrder.length - 1) return shuffleOrder[idx + 1];
+        return wraps ? shuffleOrder[0] : null;
+      }
+      if (idx > 0) return shuffleOrder[idx - 1];
+      return wraps ? shuffleOrder[shuffleOrder.length - 1] : null;
+    }
+
+    const idx = items.indexOf(activeItem);
+    if (idx === -1) return null;
+    if (direction === 'next') {
+      if (idx < items.length - 1) return items[idx + 1];
+      return wraps ? items[0] : null;
+    }
+    if (idx > 0) return items[idx - 1];
+    return wraps ? items[items.length - 1] : null;
+  }
+
+  function seekBy(deltaSec) {
+    if (!activeItem) return;
+    const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
+    const max = duration > 0 ? duration : Number.POSITIVE_INFINITY;
+    const nextTime = Math.max(0, Math.min(max, audioPlayer.currentTime + deltaSec));
+    audioPlayer.currentTime = nextTime;
+    seekBar.value = nextTime;
+    timeCur.textContent = fmtTime(nextTime);
+    updateSeekFill();
   }
 
   /* Dynamic seek-bar fill (CSS gradient trick) */
@@ -1060,6 +1261,13 @@
     currentSub.textContent   = 'Now playing';
     btnPlay.disabled = false;
 
+    if (shuffleEnabled) {
+      const visible = getVisibleItems();
+      if (!isShuffleOrderValid(visible) || !shuffleOrder.includes(li)) {
+        shuffleOrder = buildShuffleOrder(visible, li);
+      }
+    }
+
     li.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     updateSkipButtons();
   }
@@ -1076,15 +1284,30 @@
      PREV / NEXT
   ════════════════════════════════════════════ */
   btnPrev.addEventListener('click', () => {
-    const items = getVisibleItems();
-    const idx = items.indexOf(activeItem);
-    if (idx > 0) playTrack(items[idx - 1]);
+    const prev = getAdjacentTrack('prev');
+    if (prev) playTrack(prev);
   });
 
   btnNext.addEventListener('click', () => {
-    const items = getVisibleItems();
-    const idx = items.indexOf(activeItem);
-    if (idx !== -1 && idx < items.length - 1) playTrack(items[idx + 1]);
+    const next = getAdjacentTrack('next');
+    if (next) playTrack(next);
+  });
+
+  btnBack.addEventListener('click', () => seekBy(-10));
+  btnFwd.addEventListener('click', () => seekBy(10));
+
+  btnShuffle.addEventListener('click', () => {
+    shuffleEnabled = !shuffleEnabled;
+    syncShuffleOrder();
+    updateModeButtons();
+    updateSkipButtons();
+  });
+
+  btnRepeat.addEventListener('click', () => {
+    const idx = REPEAT_MODES.indexOf(repeatMode);
+    repeatMode = REPEAT_MODES[(idx + 1) % REPEAT_MODES.length];
+    updateModeButtons();
+    updateSkipButtons();
   });
 
   /* ════════════════════════════════════════════
@@ -1111,12 +1334,21 @@
   });
 
   audioPlayer.addEventListener('ended', () => {
+    if (repeatMode === 'one' && activeItem) {
+      audioPlayer.currentTime = 0;
+      audioPlayer.play();
+      return;
+    }
+
+    const next = getAdjacentTrack('next');
+    if (next) {
+      playTrack(next);
+      return;
+    }
+
     setPlayIcon(false);
     artThumb.classList.remove('spinning');
-    const items = getVisibleItems();
-    const idx = items.indexOf(activeItem);
-    if (idx !== -1 && idx < items.length - 1) playTrack(items[idx + 1]);
-    else currentSub.textContent = 'Finished';
+    currentSub.textContent = 'Finished';
   });
 
   audioPlayer.addEventListener('loadedmetadata', () => {
@@ -1175,6 +1407,8 @@
      SEARCH
   ════════════════════════════════════════════ */
   trackSearch.addEventListener('input', applySearchFilter);
+
+  updateModeButtons();
 
   /* ════════════════════════════════════════════
      INIT fills
