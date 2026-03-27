@@ -708,7 +708,10 @@
 <div class="app">
   <header>
     <div class="logo">Wave<span>·</span>length</div>
-    <div class="header-meta" id="track-count">Loading…</div>
+    <div class="header-meta">
+      <span id="track-count">Loading…</span>
+      <button id="btn-refresh" class="track-ext" type="button" title="Refresh track list" aria-label="Refresh track list">Refresh</button>
+    </div>
   </header>
 
   <main>
@@ -806,6 +809,8 @@
   const DB_NAME        = 'wavelength-cache';
   const DB_VERSION     = 1;
   const STORE_NAME     = 'tracks';
+  const TRACKS_CACHE_KEY = 'wavelength-tracks-api-cache-v1';
+  const TRACKS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
   /* ════════════════════════════════════════════
      ELEMENTS
@@ -815,6 +820,7 @@
   const currentTitle = document.getElementById('current-title');
   const currentSub   = document.getElementById('current-sub');
   const trackCount   = document.getElementById('track-count');
+  const btnRefresh   = document.getElementById('btn-refresh');
   const trackSearch  = document.getElementById('track-search');
   const filterEmpty  = document.getElementById('filter-empty');
   const stateView    = document.getElementById('state-view');
@@ -853,6 +859,7 @@
   let stalledTicks = 0;
   let recoveryInFlight = false;
   let wasPlayingBeforeHidden = false;
+  let loadTracksInFlight = null;
 
   const REPEAT_MODES = ['off', 'one', 'all'];
   const STALL_TICK_LIMIT = 4;
@@ -1229,6 +1236,60 @@
     btn.setAttribute('aria-label', btn.title);
   }
 
+  function setRefreshLoading(isLoading) {
+    btnRefresh.disabled = isLoading;
+    btnRefresh.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+  }
+
+  function clearTracksApiCache() {
+    try {
+      localStorage.removeItem(TRACKS_CACHE_KEY);
+    } catch (err) {
+      console.warn('Unable to clear tracks API cache:', err);
+    }
+  }
+
+  function readTracksApiCache() {
+    try {
+      const raw = localStorage.getItem(TRACKS_CACHE_KEY);
+      if (!raw) return null;
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') {
+        clearTracksApiCache();
+        return null;
+      }
+
+      const { timestamp, files } = parsed;
+      if (!Number.isFinite(timestamp) || !Array.isArray(files)) {
+        clearTracksApiCache();
+        return null;
+      }
+
+      if (Date.now() - timestamp > TRACKS_CACHE_TTL_MS) {
+        clearTracksApiCache();
+        return null;
+      }
+
+      return files;
+    } catch (err) {
+      clearTracksApiCache();
+      console.warn('Unable to read tracks API cache:', err);
+      return null;
+    }
+  }
+
+  function writeTracksApiCache(files) {
+    try {
+      localStorage.setItem(
+        TRACKS_CACHE_KEY,
+        JSON.stringify({ timestamp: Date.now(), files })
+      );
+    } catch (err) {
+      console.warn('Unable to write tracks API cache:', err);
+    }
+  }
+
   function getTrackSource(li) {
     return li.dataset.localUrl || li.dataset.url;
   }
@@ -1336,77 +1397,115 @@
     document.documentElement.style.setProperty('--player-effective-h', `${playerHeight}px`);
   }
 
+  function showLoadingState(message = 'Fetching tracks from GitHub…') {
+    playlist.innerHTML = '';
+    filterEmpty.style.display = 'none';
+    trackCount.textContent = 'Loading…';
+    stateView.style.display = 'flex';
+    stateView.innerHTML = `
+      <div class="spinner"></div>
+      <p>${message}</p>
+    `;
+  }
+
   /* ════════════════════════════════════════════
      FETCH TRACKS FROM GITHUB API
   ════════════════════════════════════════════ */
   const API_URL =
     `https://api.github.com/repos/${githubUsername}/${repoName}/contents/${musicFolder}`;
 
-  async function loadTracks() {
-    try {
-      const res = await fetch(API_URL);
-      if (!res.ok) {
-        const msg = res.status === 404
-          ? `Repo or folder not found.<br>Check <code>${githubUsername}/${repoName}/${musicFolder}</code>`
-          : `GitHub API error: ${res.status} ${res.statusText}`;
-        showError(msg); return;
-      }
+  async function loadTracks(options = {}) {
+    const { showLoading = true } = options;
+    if (loadTracksInFlight) return loadTracksInFlight;
 
-      const files = await res.json();
-      const audioFiles = files.filter(f =>
-        f.type === 'file' && /\.(mp3|wav|ogg|flac|m4a)$/i.test(f.name)
-      );
+    if (showLoading) {
+      showLoadingState();
+    }
+    setRefreshLoading(true);
 
-      if (audioFiles.length === 0) { showEmpty(); return; }
+    loadTracksInFlight = (async () => {
+      try {
+        let files = readTracksApiCache();
 
-      stateView.style.display = 'none';
-      totalTracks = audioFiles.length;
-      updateTrackCount(totalTracks);
+        if (!files) {
+          const res = await fetch(API_URL);
+          if (!res.ok) {
+            const msg = res.status === 404
+              ? `Repo or folder not found.<br>Check <code>${githubUsername}/${repoName}/${musicFolder}</code>`
+              : `GitHub API error: ${res.status} ${res.statusText}`;
+            showError(msg);
+            return;
+          }
 
-      audioFiles.forEach((file, index) => {
-        const ext         = file.name.split('.').pop().toLowerCase();
-        const displayName = file.name.replace(/\.[^.]+$/, '');
-        const li          = document.createElement('li');
-        const trackId     = file.path || `${musicFolder}/${file.name}`;
-
-        li.innerHTML = `
-          <span class="track-num">${String(index + 1).padStart(2, '0')}</span>
-          <span class="track-icon"></span>
-          <span class="track-title">${displayName}</span>
-          <button class="track-action" type="button" aria-label="Download for offline use" title="Download for offline use">${downloadIconSvg()}</button>
-          <span class="track-ext">${ext}</span>
-        `;
-
-        li.dataset.url  = file.download_url;
-        li.dataset.name = displayName;
-        li.dataset.id   = trackId;
-
-        const actionBtn = li.querySelector('.track-action');
-        if (!trackDb) {
-          actionBtn.disabled = true;
-          actionBtn.title = 'Offline download unavailable';
-          actionBtn.setAttribute('aria-label', actionBtn.title);
+          files = await res.json();
+          writeTracksApiCache(files);
         }
-        actionBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          toggleTrackDownload(li, actionBtn);
+
+        const audioFiles = files.filter(f =>
+          f.type === 'file' && /\.(mp3|wav|ogg|flac|m4a)$/i.test(f.name)
+        );
+
+        playlist.innerHTML = '';
+
+        if (audioFiles.length === 0) {
+          showEmpty();
+          return;
+        }
+
+        stateView.style.display = 'none';
+        totalTracks = audioFiles.length;
+        updateTrackCount(totalTracks);
+
+        audioFiles.forEach((file, index) => {
+          const ext         = file.name.split('.').pop().toLowerCase();
+          const displayName = file.name.replace(/\.[^.]+$/, '');
+          const li          = document.createElement('li');
+          const trackId     = file.path || `${musicFolder}/${file.name}`;
+
+          li.innerHTML = `
+            <span class="track-num">${String(index + 1).padStart(2, '0')}</span>
+            <span class="track-icon"></span>
+            <span class="track-title">${displayName}</span>
+            <button class="track-action" type="button" aria-label="Download for offline use" title="Download for offline use">${downloadIconSvg()}</button>
+            <span class="track-ext">${ext}</span>
+          `;
+
+          li.dataset.url  = `./music/${file.name}`;
+          li.dataset.name = displayName;
+          li.dataset.id   = trackId;
+
+          const actionBtn = li.querySelector('.track-action');
+          if (!trackDb) {
+            actionBtn.disabled = true;
+            actionBtn.title = 'Offline download unavailable';
+            actionBtn.setAttribute('aria-label', actionBtn.title);
+          }
+          actionBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleTrackDownload(li, actionBtn);
+          });
+
+          li.addEventListener('click', () => playTrack(li));
+          playlist.appendChild(li);
         });
 
-        li.addEventListener('click', () => playTrack(li));
-        playlist.appendChild(li);
-      });
+        const items = Array.from(playlist.querySelectorAll('li'));
+        for (const li of items) {
+          const cached = await idbGet(li.dataset.id);
+          if (cached?.blob) markDownloaded(li, cached.blob);
+        }
 
-      const items = Array.from(playlist.querySelectorAll('li'));
-      for (const li of items) {
-        const cached = await idbGet(li.dataset.id);
-        if (cached?.blob) markDownloaded(li, cached.blob);
+        applySearchFilter();
+
+      } catch (err) {
+        showError(`Network error:<br><code>${err.message}</code>`);
+      } finally {
+        setRefreshLoading(false);
+        loadTracksInFlight = null;
       }
+    })();
 
-      applySearchFilter();
-
-    } catch (err) {
-      showError(`Network error:<br><code>${err.message}</code>`);
-    }
+    return loadTracksInFlight;
   }
 
   /* ════════════════════════════════════════════
@@ -1593,6 +1692,13 @@
   /* ════════════════════════════════════════════
      SEARCH
   ════════════════════════════════════════════ */
+  btnRefresh.addEventListener('click', async () => {
+    if (loadTracksInFlight) return;
+    clearTracksApiCache();
+    showLoadingState('Refreshing tracks...');
+    await loadTracks({ showLoading: false });
+  });
+
   trackSearch.addEventListener('input', applySearchFilter);
 
   document.addEventListener('visibilitychange', () => {
