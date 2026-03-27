@@ -969,6 +969,40 @@
     recoveryInFlight = false;
   }
 
+  function isTrackEffectivelyEnded() {
+    if (!activeItem) return false;
+    if (audioPlayer.ended) return true;
+
+    const duration = audioPlayer.duration;
+    return Number.isFinite(duration) && duration > 0 &&
+      audioPlayer.currentTime >= duration - 0.35;
+  }
+
+  async function resumeAfterBackground(reason) {
+    if (!wasPlayingBeforeHidden || !activeItem) {
+      wasPlayingBeforeHidden = false;
+      return;
+    }
+
+    if (isTrackEffectivelyEnded()) {
+      const next = getAdjacentTrack('next');
+      if (next) {
+        await playTrack(next);
+      } else {
+        setPlaybackUiState(false, 'Finished');
+        updateMediaSessionState();
+      }
+      wasPlayingBeforeHidden = false;
+      return;
+    }
+
+    if (audioPlayer.paused) {
+      await attemptPlaybackRecovery(reason);
+    }
+
+    wasPlayingBeforeHidden = false;
+  }
+
   function setupMediaSessionActions() {
     if (!('mediaSession' in navigator)) return;
 
@@ -1572,10 +1606,7 @@
       return;
     }
 
-    if (wasPlayingBeforeHidden && activeItem && audioPlayer.paused) {
-      attemptPlaybackRecovery('resume after visibility change');
-    }
-    wasPlayingBeforeHidden = false;
+    resumeAfterBackground('resume after visibility change');
   });
 
   window.addEventListener('pageshow', () => {
@@ -1585,10 +1616,7 @@
       return;
     }
 
-    if (activeItem && audioPlayer.paused && wasPlayingBeforeHidden) {
-      attemptPlaybackRecovery('resume after pageshow');
-    }
-    wasPlayingBeforeHidden = false;
+    resumeAfterBackground('resume after pageshow');
   });
 
   window.addEventListener('pagehide', () => {
