@@ -848,8 +848,15 @@
   let shuffleEnabled = false;
   let repeatMode = 'off';
   let shuffleOrder = [];
+  let playbackMonitorId = null;
+  let lastProgressTime = 0;
+  let stalledTicks = 0;
+  let recoveryInFlight = false;
+  let wasPlayingBeforeHidden = false;
 
   const REPEAT_MODES = ['off', 'one', 'all'];
+  const STALL_TICK_LIMIT = 4;
+  const STALL_TICK_MS = 2000;
 
   /* ════════════════════════════════════════════
      HELPERS
@@ -864,6 +871,127 @@
   function setPlayIcon(playing) {
     iconPlay.style.display  = playing ? 'none'  : 'block';
     iconPause.style.display = playing ? 'block' : 'none';
+  }
+
+  function setBarsAnimationState(state) {
+    if (!activeItem) return;
+    activeItem.querySelectorAll('.bars span')
+      .forEach(b => b.style.animationPlayState = state);
+  }
+
+  function setPlaybackUiState(playing, subtitle) {
+    setPlayIcon(playing);
+    artThumb.classList.toggle('spinning', playing);
+    setBarsAnimationState(playing ? 'running' : 'paused');
+    if (activeItem) {
+      currentSub.textContent = subtitle;
+    }
+  }
+
+  function updateMediaSessionMeta(li) {
+    if (!('mediaSession' in navigator) || !li || typeof MediaMetadata !== 'function') return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: li.dataset.name,
+      artist: 'Wavelength'
+    });
+  }
+
+  function updateMediaSessionState() {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.playbackState = audioPlayer.paused ? 'paused' : 'playing';
+  }
+
+  async function safePlay(reason = 'playback request') {
+    try {
+      const result = audioPlayer.play();
+      if (result && typeof result.then === 'function') {
+        await result;
+      }
+      return true;
+    } catch (err) {
+      console.warn(`Playback blocked during ${reason}:`, err);
+      setPlaybackUiState(false, 'Tap play to resume');
+      updateMediaSessionState();
+      return false;
+    }
+  }
+
+  function startPlaybackMonitor() {
+    if (playbackMonitorId) return;
+    playbackMonitorId = window.setInterval(() => {
+      if (!activeItem || audioPlayer.paused || audioPlayer.ended) {
+        stalledTicks = 0;
+        lastProgressTime = audioPlayer.currentTime;
+        return;
+      }
+
+      const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
+      const delta = Math.abs(audioPlayer.currentTime - lastProgressTime);
+
+      if (delta < 0.05) {
+        stalledTicks += 1;
+      } else {
+        stalledTicks = 0;
+      }
+      lastProgressTime = audioPlayer.currentTime;
+
+      if (duration > 0 && audioPlayer.currentTime >= duration - 0.25 && stalledTicks >= 2) {
+        const next = getAdjacentTrack('next');
+        if (next) {
+          playTrack(next);
+          return;
+        }
+      }
+
+      if (stalledTicks >= STALL_TICK_LIMIT) {
+        stalledTicks = 0;
+        attemptPlaybackRecovery('stalled in background');
+      }
+    }, STALL_TICK_MS);
+  }
+
+  async function attemptPlaybackRecovery(reason) {
+    if (recoveryInFlight || !activeItem) return;
+    recoveryInFlight = true;
+
+    if (!audioPlayer.paused) {
+      currentSub.textContent = 'Recovering playback...';
+    }
+
+    const resumed = await safePlay(reason);
+    if (!resumed) {
+      const next = getAdjacentTrack('next');
+      if (next) {
+        await playTrack(next);
+      }
+    }
+
+    recoveryInFlight = false;
+  }
+
+  function setupMediaSessionActions() {
+    if (!('mediaSession' in navigator)) return;
+
+    const setHandler = (name, handler) => {
+      try {
+        navigator.mediaSession.setActionHandler(name, handler);
+      } catch (err) {
+        console.warn(`Media Session action ${name} unavailable:`, err);
+      }
+    };
+
+    setHandler('play', () => safePlay('media session play'));
+    setHandler('pause', () => audioPlayer.pause());
+    setHandler('nexttrack', () => {
+      const next = getAdjacentTrack('next');
+      if (next) playTrack(next);
+    });
+    setHandler('previoustrack', () => {
+      const prev = getAdjacentTrack('prev');
+      if (prev) playTrack(prev);
+    });
+    setHandler('seekbackward', (details) => seekBy(-(details?.seekOffset || 10)));
+    setHandler('seekforward', (details) => seekBy(details?.seekOffset || 10));
   }
 
   function updateSkipButtons() {
@@ -1149,7 +1277,7 @@
           const t = audioPlayer.currentTime;
           audioPlayer.src = li.dataset.url;
           audioPlayer.currentTime = t;
-          audioPlayer.play();
+          await safePlay('resume after deleting cached track');
         }
       }
     } catch (err) {
@@ -1241,7 +1369,7 @@
   /* ════════════════════════════════════════════
      PLAYBACK
   ════════════════════════════════════════════ */
-  function playTrack(li) {
+  async function playTrack(li) {
     if (activeItem && activeItem !== li) {
       activeItem.classList.remove('active');
       const barsEl = activeItem.querySelector('.track-icon');
@@ -1255,10 +1383,10 @@
     iconSlot.innerHTML = `<span class="bars"><span></span><span></span><span></span></span>`;
 
     audioPlayer.src = getTrackSource(li);
-    audioPlayer.play();
+    updateMediaSessionMeta(li);
 
     currentTitle.textContent = li.dataset.name;
-    currentSub.textContent   = 'Now playing';
+    currentSub.textContent   = 'Buffering...';
     btnPlay.disabled = false;
 
     if (shuffleEnabled) {
@@ -1270,13 +1398,15 @@
 
     li.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     updateSkipButtons();
+
+    await safePlay('starting selected track');
   }
 
   /* ════════════════════════════════════════════
      PLAY / PAUSE BUTTON
   ════════════════════════════════════════════ */
   btnPlay.addEventListener('click', () => {
-    if (audioPlayer.paused) audioPlayer.play();
+    if (audioPlayer.paused) safePlay('manual play');
     else audioPlayer.pause();
   });
 
@@ -1314,29 +1444,21 @@
      AUDIO EVENTS
   ════════════════════════════════════════════ */
   audioPlayer.addEventListener('play', () => {
-    setPlayIcon(true);
-    artThumb.classList.add('spinning');
-    if (activeItem) {
-      activeItem.querySelectorAll('.bars span')
-        .forEach(b => b.style.animationPlayState = 'running');
-      currentSub.textContent = 'Now playing';
-    }
+    setPlaybackUiState(true, 'Now playing');
+    updateMediaSessionState();
+    lastProgressTime = audioPlayer.currentTime;
+    stalledTicks = 0;
   });
 
   audioPlayer.addEventListener('pause', () => {
-    setPlayIcon(false);
-    artThumb.classList.remove('spinning');
-    if (activeItem) {
-      activeItem.querySelectorAll('.bars span')
-        .forEach(b => b.style.animationPlayState = 'paused');
-      currentSub.textContent = 'Paused';
-    }
+    setPlaybackUiState(false, 'Paused');
+    updateMediaSessionState();
   });
 
   audioPlayer.addEventListener('ended', () => {
     if (repeatMode === 'one' && activeItem) {
       audioPlayer.currentTime = 0;
-      audioPlayer.play();
+      safePlay('repeat one restart');
       return;
     }
 
@@ -1349,6 +1471,42 @@
     setPlayIcon(false);
     artThumb.classList.remove('spinning');
     currentSub.textContent = 'Finished';
+  });
+
+  audioPlayer.addEventListener('playing', () => {
+    setPlaybackUiState(true, 'Now playing');
+    updateMediaSessionState();
+    lastProgressTime = audioPlayer.currentTime;
+    stalledTicks = 0;
+  });
+
+  audioPlayer.addEventListener('waiting', () => {
+    if (!audioPlayer.paused && activeItem) {
+      currentSub.textContent = 'Buffering...';
+    }
+  });
+
+  audioPlayer.addEventListener('stalled', () => {
+    if (!audioPlayer.paused) {
+      attemptPlaybackRecovery('audio stalled');
+    }
+  });
+
+  audioPlayer.addEventListener('suspend', () => {
+    if (!document.hidden && !audioPlayer.paused) {
+      attemptPlaybackRecovery('audio suspended');
+    }
+  });
+
+  audioPlayer.addEventListener('error', () => {
+    console.error('Audio error:', audioPlayer.error);
+    setPlaybackUiState(false, 'Playback error');
+    updateMediaSessionState();
+
+    const next = getAdjacentTrack('next');
+    if (next) {
+      playTrack(next);
+    }
   });
 
   audioPlayer.addEventListener('loadedmetadata', () => {
@@ -1408,7 +1566,38 @@
   ════════════════════════════════════════════ */
   trackSearch.addEventListener('input', applySearchFilter);
 
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      wasPlayingBeforeHidden = !!activeItem && !audioPlayer.paused;
+      return;
+    }
+
+    if (wasPlayingBeforeHidden && activeItem && audioPlayer.paused) {
+      attemptPlaybackRecovery('resume after visibility change');
+    }
+    wasPlayingBeforeHidden = false;
+  });
+
+  window.addEventListener('pageshow', () => {
+    if (activeItem && !audioPlayer.paused) {
+      setPlaybackUiState(true, 'Now playing');
+      updateMediaSessionState();
+      return;
+    }
+
+    if (activeItem && audioPlayer.paused && wasPlayingBeforeHidden) {
+      attemptPlaybackRecovery('resume after pageshow');
+    }
+    wasPlayingBeforeHidden = false;
+  });
+
+  window.addEventListener('pagehide', () => {
+    wasPlayingBeforeHidden = !!activeItem && !audioPlayer.paused;
+  });
+
   updateModeButtons();
+  setupMediaSessionActions();
+  startPlaybackMonitor();
 
   /* ════════════════════════════════════════════
      INIT fills
