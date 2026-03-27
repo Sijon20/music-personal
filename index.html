@@ -967,28 +967,13 @@
 
     const resumed = await safePlay(reason);
     if (!resumed) {
-      await advanceAfterTrackBoundary(reason);
+      const next = getAdjacentTrack('next');
+      if (next) {
+        await playTrack(next);
+      }
     }
 
     recoveryInFlight = false;
-  }
-
-  async function advanceAfterTrackBoundary(reason) {
-    if (repeatMode === 'one' && activeItem) {
-      audioPlayer.currentTime = 0;
-      await safePlay(`${reason} repeat one restart`);
-      return true;
-    }
-
-    const next = getAdjacentTrack('next');
-    if (next) {
-      await playTrack(next);
-      return true;
-    }
-
-    setPlaybackUiState(false, 'Finished');
-    updateMediaSessionState();
-    return false;
   }
 
   function isTrackEffectivelyEnded() {
@@ -1007,7 +992,13 @@
     }
 
     if (isTrackEffectivelyEnded()) {
-      await advanceAfterTrackBoundary(reason);
+      const next = getAdjacentTrack('next');
+      if (next) {
+        await playTrack(next);
+      } else {
+        setPlaybackUiState(false, 'Finished');
+        updateMediaSessionState();
+      }
       wasPlayingBeforeHidden = false;
       return;
     }
@@ -1598,7 +1589,21 @@
   });
 
   audioPlayer.addEventListener('ended', () => {
-    advanceAfterTrackBoundary('ended event');
+    if (repeatMode === 'one' && activeItem) {
+      audioPlayer.currentTime = 0;
+      safePlay('repeat one restart');
+      return;
+    }
+
+    const next = getAdjacentTrack('next');
+    if (next) {
+      playTrack(next);
+      return;
+    }
+
+    setPlayIcon(false);
+    artThumb.classList.remove('spinning');
+    currentSub.textContent = 'Finished';
   });
 
   audioPlayer.addEventListener('playing', () => {
