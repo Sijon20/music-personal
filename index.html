@@ -857,10 +857,12 @@
   let shuffleEnabled = false;
   let repeatMode = 'off';
   let shuffleOrder = [];
-  let playbackMonitorId = null;
+  let playbackMonitorTimer = null;
+  let playbackMonitorInterval = 2000;
   let lastProgressTime = 0;
   let stalledTicks = 0;
   let recoveryInFlight = false;
+  let boundaryAdvanceInFlight = false;
   let wasPlayingBeforeHidden = false;
   let loadTracksInFlight = null;
   let wakeLock = null;
@@ -873,6 +875,8 @@
   const REPEAT_MODES = ['off', 'one', 'all'];
   const STALL_TICK_LIMIT = 4;
   const STALL_TICK_MS = 2000;
+  const BACKGROUND_STALL_TICK_MS = 5000;
+  const HEARTBEAT_TICK_MS = 1000;
 
   /* ════════════════════════════════════════════
      HELPERS
@@ -949,38 +953,69 @@
     }
   }
 
-  /* Re-acquire wake lock when page becomes visible again (it gets released on hide) */
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && !audioPlayer.paused && activeItem) {
-      requestWakeLock();
-    }
-  });
-
   /* ── Silent Audio Keep-Alive via Web Audio API ── */
   /* Creates an inaudible oscillator to prevent the browser from
      suspending the audio processing thread in the background */
   function startSilentKeepAlive() {
-    if (silentAudioCtx) return;
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) return;
-      silentAudioCtx = new AudioCtx();
+
+      if (!silentAudioCtx) {
+        silentAudioCtx = new AudioCtx();
+      }
+
+      if (silentAudioCtx.state === 'suspended') {
+        silentAudioCtx.resume().catch(() => {});
+      }
+
+      if (silentOscillator) return;
+
       silentOscillator = silentAudioCtx.createOscillator();
       const gainNode = silentAudioCtx.createGain();
-      gainNode.gain.value = 0.001; // essentially silent
+      gainNode.gain.value = 0.002; // still inaudible, more resilient in Android background
       silentOscillator.connect(gainNode);
       gainNode.connect(silentAudioCtx.destination);
       silentOscillator.start();
+      silentOscillator.onended = () => {
+        silentOscillator = null;
+      };
     } catch (e) {
       console.warn('Silent keep-alive failed:', e);
     }
   }
 
   function stopSilentKeepAlive() {
-    try {
-      if (silentOscillator) { silentOscillator.stop(); silentOscillator = null; }
-      if (silentAudioCtx) { silentAudioCtx.close(); silentAudioCtx = null; }
-    } catch (e) { /* ignore */ }
+    if (silentOscillator) {
+      try {
+        silentOscillator.stop();
+      } catch (e) { /* ignore */ }
+      silentOscillator = null;
+    }
+
+    if (silentAudioCtx) {
+      silentAudioCtx.close().catch(() => {});
+      silentAudioCtx = null;
+    }
+  }
+
+  function ensureKeepAliveHealth() {
+    if (!silentAudioCtx) {
+      startSilentKeepAlive();
+      return;
+    }
+
+    if (silentAudioCtx.state === 'suspended') {
+      silentAudioCtx.resume().catch(() => {});
+    }
+
+    if (!silentOscillator) {
+      startSilentKeepAlive();
+    }
+  }
+
+  function setPlaybackMonitorCadence() {
+    playbackMonitorInterval = document.hidden ? BACKGROUND_STALL_TICK_MS : STALL_TICK_MS;
   }
 
   /* ── Pre-buffer: load next track's audio ahead of time ── */
@@ -989,6 +1024,9 @@
     if (next) {
       const src = getTrackSource(next);
       if (audioPrefetch.src !== src) {
+        audioPrefetch.onerror = () => {
+          audioPrefetch.removeAttribute('src');
+        };
         audioPrefetch.src = src;
         audioPrefetch.load();
       }
@@ -999,22 +1037,28 @@
   /* Uses recursive setTimeout which some browsers treat slightly better than setInterval */
   function startHeartbeat() {
     stopHeartbeat();
+
     function tick() {
       if (!activeItem) { heartbeatTimer = null; return; }
+
       if (!audioPlayer.paused && !audioPlayer.ended) {
+        ensureKeepAliveHealth();
+
         /* Update MediaSession position to keep OS controls alive */
         updateMediaSessionPosition();
 
         /* If we're near the end and audio seems stuck, force advance */
         const dur = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
         if (dur > 0 && audioPlayer.currentTime >= dur - 0.5) {
-          advanceAfterTrackBoundary('heartbeat end-of-track');
+          void advanceAfterTrackBoundary('heartbeat end-of-track');
           return;
         }
       }
-      heartbeatTimer = setTimeout(tick, 1000);
+
+      heartbeatTimer = setTimeout(tick, HEARTBEAT_TICK_MS);
     }
-    heartbeatTimer = setTimeout(tick, 1000);
+
+    heartbeatTimer = setTimeout(tick, HEARTBEAT_TICK_MS);
   }
 
   function stopHeartbeat() {
@@ -1056,80 +1100,89 @@
   }
 
   function startPlaybackMonitor() {
-    if (playbackMonitorId) return;
-    playbackMonitorId = window.setInterval(() => {
+    if (playbackMonitorTimer) return;
+
+    const tick = () => {
       if (!activeItem || audioPlayer.paused || audioPlayer.ended) {
         stalledTicks = 0;
         lastProgressTime = audioPlayer.currentTime;
-        return;
-      }
-
-      const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
-      const delta = Math.abs(audioPlayer.currentTime - lastProgressTime);
-
-      if (delta < 0.05) {
-        stalledTicks += 1;
       } else {
-        stalledTicks = 0;
-      }
-      lastProgressTime = audioPlayer.currentTime;
+        const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
+        const delta = Math.abs(audioPlayer.currentTime - lastProgressTime);
 
-      if (duration > 0 && audioPlayer.currentTime >= duration - 0.25 && stalledTicks >= 2) {
-        const next = getAdjacentTrack('next');
-        if (next) {
-          playTrack(next);
-          return;
+        if (delta < 0.05) {
+          stalledTicks += 1;
+        } else {
+          stalledTicks = 0;
+        }
+        lastProgressTime = audioPlayer.currentTime;
+
+        if (duration > 0 && audioPlayer.currentTime >= duration - 0.25 && stalledTicks >= 2) {
+          void advanceAfterTrackBoundary('monitor near-end stall');
+        }
+
+        if (stalledTicks >= STALL_TICK_LIMIT) {
+          stalledTicks = 0;
+          void attemptPlaybackRecovery('stalled in background');
         }
       }
 
-      if (stalledTicks >= STALL_TICK_LIMIT) {
-        stalledTicks = 0;
-        attemptPlaybackRecovery('stalled in background');
-      }
-    }, STALL_TICK_MS);
+      playbackMonitorTimer = window.setTimeout(tick, playbackMonitorInterval);
+    };
+
+    tick();
   }
 
   async function attemptPlaybackRecovery(reason) {
     if (recoveryInFlight || !activeItem) return;
     recoveryInFlight = true;
 
-    if (!audioPlayer.paused) {
-      currentSub.textContent = 'Recovering playback...';
-    }
+    try {
+      if (!audioPlayer.paused) {
+        currentSub.textContent = 'Recovering playback...';
+      }
 
-    /* Try reloading the source if audio is in an error state */
-    if (audioPlayer.error) {
-      const src = getTrackSource(activeItem);
-      const currentTime = audioPlayer.currentTime;
-      audioPlayer.src = src;
-      audioPlayer.currentTime = currentTime;
-    }
+      /* Try reloading the source if audio is in an error state */
+      if (audioPlayer.error) {
+        const src = getTrackSource(activeItem);
+        const currentTime = audioPlayer.currentTime;
+        audioPlayer.src = src;
+        audioPlayer.currentTime = currentTime;
+      }
 
-    playRetryCount = 0; /* reset retries for recovery */
-    const resumed = await safePlay(reason);
-    if (!resumed) {
-      await advanceAfterTrackBoundary(reason);
+      playRetryCount = 0; /* reset retries for recovery */
+      const resumed = await safePlay(reason);
+      if (!resumed) {
+        await advanceAfterTrackBoundary(reason);
+      }
+    } finally {
+      recoveryInFlight = false;
     }
-
-    recoveryInFlight = false;
   }
 
   async function advanceAfterTrackBoundary(reason) {
-    if (repeatMode === 'one' && activeItem) {
-      audioPlayer.currentTime = 0;
-      await safePlay(`${reason} repeat one restart`);
-      return true;
-    }
+    if (boundaryAdvanceInFlight) return false;
+    boundaryAdvanceInFlight = true;
 
-    const next = getAdjacentTrack('next');
-    if (next) {
-      await playTrack(next);
-      return true;
-    }
+    try {
+      if (repeatMode === 'one' && activeItem) {
+        audioPlayer.currentTime = 0;
+        await safePlay(`${reason} repeat one restart`);
+        return true;
+      }
 
-    setPlaybackUiState(false, 'Finished');
-    updateMediaSessionState();
-    return false;
+      const next = getAdjacentTrack('next');
+      if (next) {
+        await playTrack(next);
+        return true;
+      }
+
+      setPlaybackUiState(false, 'Finished');
+      updateMediaSessionState();
+      return false;
+    } finally {
+      boundaryAdvanceInFlight = false;
+    }
   }
 
   function isTrackEffectivelyEnded() {
@@ -1880,6 +1933,8 @@
   trackSearch.addEventListener('input', applySearchFilter);
 
   document.addEventListener('visibilitychange', () => {
+    setPlaybackMonitorCadence();
+
     if (document.hidden) {
       wasPlayingBeforeHidden = !!activeItem && !audioPlayer.paused;
       return;
@@ -1888,35 +1943,43 @@
     /* Re-acquire wake lock (it's released when page becomes hidden) */
     if (activeItem && !audioPlayer.paused) {
       requestWakeLock();
+      ensureKeepAliveHealth();
     }
-    resumeAfterBackground('resume after visibility change');
+    void resumeAfterBackground('resume after visibility change');
   });
 
   window.addEventListener('pageshow', (event) => {
+    setPlaybackMonitorCadence();
+
     if (activeItem && !audioPlayer.paused) {
       setPlaybackUiState(true, 'Now playing');
       updateMediaSessionState();
       requestWakeLock();
+      ensureKeepAliveHealth();
       startHeartbeat();
       return;
     }
 
-    resumeAfterBackground('resume after pageshow');
+    void resumeAfterBackground('resume after pageshow');
   });
 
   window.addEventListener('pagehide', () => {
     wasPlayingBeforeHidden = !!activeItem && !audioPlayer.paused;
+    setPlaybackMonitorCadence();
   });
 
   /* Handle iOS-specific focus events for background resume */
   window.addEventListener('focus', () => {
+    setPlaybackMonitorCadence();
+
     if (activeItem && wasPlayingBeforeHidden) {
-      resumeAfterBackground('resume after window focus');
+      void resumeAfterBackground('resume after window focus');
     }
   });
 
   updateModeButtons();
   setupMediaSessionActions();
+  setPlaybackMonitorCadence();
   startPlaybackMonitor();
 
   /* ════════════════════════════════════════════
