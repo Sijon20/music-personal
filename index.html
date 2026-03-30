@@ -797,7 +797,8 @@
 </div>
 
 <!-- hidden native audio -->
-<audio id="audio-player" preload="none"></audio>
+<audio id="audio-player" preload="auto"></audio>
+<audio id="audio-prefetch" preload="auto" style="display:none"></audio>
 
 <script>
   /* ════════════════════════════════════════════
@@ -846,6 +847,8 @@
   const iconMute = document.getElementById('icon-mute');
   const artThumb = document.getElementById('art-thumb');
 
+  const audioPrefetch = document.getElementById('audio-prefetch');
+
   let activeItem  = null;
   let isSeeking   = false;
   let lastVol     = 1;
@@ -860,6 +863,12 @@
   let recoveryInFlight = false;
   let wasPlayingBeforeHidden = false;
   let loadTracksInFlight = null;
+  let wakeLock = null;
+  let silentAudioCtx = null;
+  let silentOscillator = null;
+  let heartbeatTimer = null;
+  let playRetryCount = 0;
+  const MAX_PLAY_RETRIES = 3;
 
   const REPEAT_MODES = ['off', 'one', 'all'];
   const STALL_TICK_LIMIT = 4;
@@ -908,15 +917,138 @@
     navigator.mediaSession.playbackState = audioPlayer.paused ? 'paused' : 'playing';
   }
 
+  function updateMediaSessionPosition() {
+    if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return;
+    try {
+      const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
+      if (duration > 0) {
+        navigator.mediaSession.setPositionState({
+          duration: duration,
+          playbackRate: audioPlayer.playbackRate || 1,
+          position: Math.min(audioPlayer.currentTime, duration)
+        });
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  /* ── Wake Lock: prevent device from sleeping during playback ── */
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (e) {
+      console.warn('Wake Lock request failed:', e);
+    }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) {
+      wakeLock.release().catch(() => {});
+      wakeLock = null;
+    }
+  }
+
+  /* Re-acquire wake lock when page becomes visible again (it gets released on hide) */
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !audioPlayer.paused && activeItem) {
+      requestWakeLock();
+    }
+  });
+
+  /* ── Silent Audio Keep-Alive via Web Audio API ── */
+  /* Creates an inaudible oscillator to prevent the browser from
+     suspending the audio processing thread in the background */
+  function startSilentKeepAlive() {
+    if (silentAudioCtx) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      silentAudioCtx = new AudioCtx();
+      silentOscillator = silentAudioCtx.createOscillator();
+      const gainNode = silentAudioCtx.createGain();
+      gainNode.gain.value = 0.001; // essentially silent
+      silentOscillator.connect(gainNode);
+      gainNode.connect(silentAudioCtx.destination);
+      silentOscillator.start();
+    } catch (e) {
+      console.warn('Silent keep-alive failed:', e);
+    }
+  }
+
+  function stopSilentKeepAlive() {
+    try {
+      if (silentOscillator) { silentOscillator.stop(); silentOscillator = null; }
+      if (silentAudioCtx) { silentAudioCtx.close(); silentAudioCtx = null; }
+    } catch (e) { /* ignore */ }
+  }
+
+  /* ── Pre-buffer: load next track's audio ahead of time ── */
+  function prefetchNextTrack() {
+    const next = getAdjacentTrack('next');
+    if (next) {
+      const src = getTrackSource(next);
+      if (audioPrefetch.src !== src) {
+        audioPrefetch.src = src;
+        audioPrefetch.load();
+      }
+    }
+  }
+
+  /* ── Heartbeat: a fallback mechanism for when setInterval is throttled ── */
+  /* Uses recursive setTimeout which some browsers treat slightly better than setInterval */
+  function startHeartbeat() {
+    stopHeartbeat();
+    function tick() {
+      if (!activeItem) { heartbeatTimer = null; return; }
+      if (!audioPlayer.paused && !audioPlayer.ended) {
+        /* Update MediaSession position to keep OS controls alive */
+        updateMediaSessionPosition();
+
+        /* If we're near the end and audio seems stuck, force advance */
+        const dur = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
+        if (dur > 0 && audioPlayer.currentTime >= dur - 0.5) {
+          advanceAfterTrackBoundary('heartbeat end-of-track');
+          return;
+        }
+      }
+      heartbeatTimer = setTimeout(tick, 1000);
+    }
+    heartbeatTimer = setTimeout(tick, 1000);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) { clearTimeout(heartbeatTimer); heartbeatTimer = null; }
+  }
+
   async function safePlay(reason = 'playback request') {
     try {
+      /* Resume AudioContext if suspended (iOS requirement) */
+      if (silentAudioCtx && silentAudioCtx.state === 'suspended') {
+        silentAudioCtx.resume().catch(() => {});
+      }
       const result = audioPlayer.play();
       if (result && typeof result.then === 'function') {
         await result;
       }
+      playRetryCount = 0;
+      requestWakeLock();
+      startSilentKeepAlive();
+      startHeartbeat();
       return true;
     } catch (err) {
       console.warn(`Playback blocked during ${reason}:`, err);
+      /* Retry logic — mobile browsers sometimes need a moment */
+      if (playRetryCount < MAX_PLAY_RETRIES) {
+        playRetryCount++;
+        console.log(`Retry attempt ${playRetryCount}/${MAX_PLAY_RETRIES}...`);
+        return new Promise(resolve => {
+          setTimeout(async () => {
+            resolve(await safePlay(`${reason} (retry ${playRetryCount})`));
+          }, 300 * playRetryCount);
+        });
+      }
+      playRetryCount = 0;
       setPlaybackUiState(false, 'Tap play to resume');
       updateMediaSessionState();
       return false;
@@ -965,6 +1097,15 @@
       currentSub.textContent = 'Recovering playback...';
     }
 
+    /* Try reloading the source if audio is in an error state */
+    if (audioPlayer.error) {
+      const src = getTrackSource(activeItem);
+      const currentTime = audioPlayer.currentTime;
+      audioPlayer.src = src;
+      audioPlayer.currentTime = currentTime;
+    }
+
+    playRetryCount = 0; /* reset retries for recovery */
     const resumed = await safePlay(reason);
     if (!resumed) {
       await advanceAfterTrackBoundary(reason);
@@ -1524,12 +1665,16 @@
     const iconSlot = li.querySelector('.track-icon');
     iconSlot.innerHTML = `<span class="bars"><span></span><span></span><span></span></span>`;
 
-    audioPlayer.src = getTrackSource(li);
+    /* If the prefetch element already has this track loaded, swap it in fast */
+    const src = getTrackSource(li);
+    audioPlayer.src = src;
+    audioPlayer.load(); /* force load with preload="auto" */
     updateMediaSessionMeta(li);
 
     currentTitle.textContent = li.dataset.name;
     currentSub.textContent   = 'Buffering...';
     btnPlay.disabled = false;
+    playRetryCount = 0; /* fresh track, reset retries */
 
     if (shuffleEnabled) {
       const visible = getVisibleItems();
@@ -1541,7 +1686,11 @@
     li.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     updateSkipButtons();
 
-    await safePlay('starting selected track');
+    const played = await safePlay('starting selected track');
+    if (played) {
+      /* Pre-buffer the next track so the transition is seamless */
+      prefetchNextTrack();
+    }
   }
 
   /* ════════════════════════════════════════════
@@ -1588,24 +1737,39 @@
   audioPlayer.addEventListener('play', () => {
     setPlaybackUiState(true, 'Now playing');
     updateMediaSessionState();
+    updateMediaSessionPosition();
     lastProgressTime = audioPlayer.currentTime;
     stalledTicks = 0;
+    requestWakeLock();
+    startSilentKeepAlive();
+    startHeartbeat();
   });
 
   audioPlayer.addEventListener('pause', () => {
     setPlaybackUiState(false, 'Paused');
     updateMediaSessionState();
+    releaseWakeLock();
+    stopSilentKeepAlive();
+    stopHeartbeat();
   });
 
   audioPlayer.addEventListener('ended', () => {
+    /* Immediately attempt to advance — don't rely on the browser keeping us alive */
+    stopHeartbeat();
     advanceAfterTrackBoundary('ended event');
   });
 
   audioPlayer.addEventListener('playing', () => {
     setPlaybackUiState(true, 'Now playing');
     updateMediaSessionState();
+    updateMediaSessionPosition();
     lastProgressTime = audioPlayer.currentTime;
     stalledTicks = 0;
+  });
+
+  /* Periodically update MediaSession position state to keep OS controls alive */
+  audioPlayer.addEventListener('timeupdate', () => {
+    updateMediaSessionPosition();
   });
 
   audioPlayer.addEventListener('waiting', () => {
@@ -1616,13 +1780,27 @@
 
   audioPlayer.addEventListener('stalled', () => {
     if (!audioPlayer.paused) {
-      attemptPlaybackRecovery('audio stalled');
+      /* On mobile, stalled often means the network fetch was suspended.
+         Give it a brief moment before trying recovery. */
+      setTimeout(() => {
+        if (!audioPlayer.paused && activeItem) {
+          attemptPlaybackRecovery('audio stalled');
+        }
+      }, 500);
     }
   });
 
   audioPlayer.addEventListener('suspend', () => {
-    if (!document.hidden && !audioPlayer.paused) {
-      attemptPlaybackRecovery('audio suspended');
+    /* Only try recovery if we're supposed to be playing
+       AND the audio has actually stopped progressing */
+    if (!audioPlayer.paused && activeItem) {
+      const checkTime = audioPlayer.currentTime;
+      setTimeout(() => {
+        if (!audioPlayer.paused && activeItem &&
+            Math.abs(audioPlayer.currentTime - checkTime) < 0.05) {
+          attemptPlaybackRecovery('audio suspended and not progressing');
+        }
+      }, 1000);
     }
   });
 
@@ -1707,13 +1885,19 @@
       return;
     }
 
+    /* Re-acquire wake lock (it's released when page becomes hidden) */
+    if (activeItem && !audioPlayer.paused) {
+      requestWakeLock();
+    }
     resumeAfterBackground('resume after visibility change');
   });
 
-  window.addEventListener('pageshow', () => {
+  window.addEventListener('pageshow', (event) => {
     if (activeItem && !audioPlayer.paused) {
       setPlaybackUiState(true, 'Now playing');
       updateMediaSessionState();
+      requestWakeLock();
+      startHeartbeat();
       return;
     }
 
@@ -1722,6 +1906,13 @@
 
   window.addEventListener('pagehide', () => {
     wasPlayingBeforeHidden = !!activeItem && !audioPlayer.paused;
+  });
+
+  /* Handle iOS-specific focus events for background resume */
+  window.addEventListener('focus', () => {
+    if (activeItem && wasPlayingBeforeHidden) {
+      resumeAfterBackground('resume after window focus');
+    }
   });
 
   updateModeButtons();
